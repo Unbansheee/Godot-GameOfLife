@@ -1,0 +1,771 @@
+[gd_scene load_steps=16 format=3 uid="uid://la6scjmiph0e"]
+
+[ext_resource type="PackedScene" uid="uid://bb8gfunktlw3y" path="res://scenes/game_of_life_simulation.tscn" id="5_182jw"]
+[ext_resource type="PackedScene" uid="uid://ddivo6ilohsb7" path="res://scenes/fps_counter.tscn" id="6_8id5a"]
+
+[sub_resource type="Shader" id="Shader_q27e0"]
+code = "shader_type sky;
+render_mode use_quarter_res_pass;
+
+// Originaly based on https://godotshaders.com/shader/stylized-sky-shader-with-clouds/ but there's not much left
+
+group_uniforms sky;
+	uniform vec3 day_top_color : source_color = vec3( 0.1, 0.6, 1.0 );
+	uniform vec3 day_bottom_color : source_color = vec3( 0.4, 0.8, 1.0 );
+	uniform vec3 sunset_top_color : source_color = vec3( 0.7, 0.75, 1.0 );
+	uniform vec3 sunset_bottom_color : source_color = vec3( 1.0, 0.5, 0.7 );
+	uniform vec3 night_top_color : source_color = vec3( 0.02, 0.0, 0.04 );
+	uniform vec3 night_bottom_color : source_color = vec3( 0.1, 0.0, 0.2 );
+
+group_uniforms horizon;
+	uniform vec3 horizon_color : source_color = vec3( 0.0, 0.7, 0.8 );
+	uniform float horizon_blur : hint_range( 0.0, 1.0, 0.01 ) = 0.05;
+
+group_uniforms sun; // First DirectionalLight3D will be the sun
+	uniform vec3 sun_color : source_color = vec3( 10.0, 8.0, 1.0 );
+	uniform vec3 sun_sunset_color : source_color = vec3( 10.0, 0.0, 0.0 );
+	uniform float sun_size : hint_range( 0.01, 1.0 ) = 0.2;
+	uniform float sun_blur : hint_range( 0.01, 20.0 ) = 10.0;
+
+group_uniforms moon; // Second DirectionalLight3D will be the moon
+	uniform vec3 moon_color : source_color = vec3( 1.0, 0.95, 0.7 );
+	uniform float moon_size : hint_range( 0.01, 1.0 ) = 0.06;
+	uniform float moon_blur : hint_range( 0.01, 10.0 ) = 0.1;
+
+group_uniforms clouds;
+	// Replaced by noise functions, unncomment if you want to use graphical textures
+//	uniform sampler2D clouds_top_texture : filter_linear_mipmap, hint_default_black;
+//	uniform sampler2D clouds_middle_texture : filter_linear_mipmap, hint_default_black;
+//	uniform sampler2D clouds_bottom_texture : filter_linear_mipmap, hint_default_black;
+	uniform vec3 clouds_edge_color : source_color = vec3( 0.8, 0.8, 0.98 );
+	uniform vec3 clouds_top_color : source_color = vec3( 1.0, 1.0, 1.00 );
+	uniform vec3 clouds_middle_color : source_color = vec3( 0.92, 0.92, 0.98 );
+	uniform vec3 clouds_bottom_color : source_color = vec3( 0.83, 0.83, 0.94 );
+	uniform float clouds_speed : hint_range( 0.0, 20.0, 0.01 ) = 2.0;
+	uniform float clouds_direction : hint_range( -0.5, 0.5, 0.0 ) = 0.2;
+	uniform float clouds_scale : hint_range( 0.0, 4.0, 0.01 ) = 1.0;
+	uniform float clouds_cutoff : hint_range( 0.0, 1.0, 0.01 ) = 0.3;
+	uniform float clouds_fuzziness : hint_range( 0.0, 2.0, 0.01 ) = 0.5;
+	// More weight is simply a darker color, usefull for rain/storm
+	uniform float clouds_weight : hint_range( 0.0, 1.0, 0.01 ) = 0.0;
+	uniform float clouds_blur : hint_range( 0.0, 1.0, 0.01 ) = 0.25;
+
+group_uniforms stars;
+	// Stars should be at black background
+	uniform sampler2D stars_texture : filter_linear_mipmap, hint_default_black;
+	uniform float stars_speed : hint_range( 0.0, 20.0, 0.01 ) = 1.0;
+
+group_uniforms settings;
+	uniform float overwritten_time = 0.0;
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+	// Function for clouds noises. You can replace using \"gen_fractal_ping_pong\" with a simple texture reading.
+	// I was frustrated with the repeating texture that's why I included the algorithm in the code.
+	// Source: https://github.com/Auburn/FastNoiseLite/tree/master
+	const int PRIME_X = 501125321;
+	const int PRIME_Y = 1136930381;
+	float lerp( float a, float b, float t )
+	{
+		return a + t * ( b - a );
+	}
+	float cubic_lerp( float a, float b, float c, float d, float t )
+	{
+		float p = d - c - ( a - b );
+		return t * t * t * p + t * t * ( a - b - p ) + t * ( c - a ) + b;
+	}
+	float ping_pong( float t )
+	{
+		t -= trunc( t * 0.5 ) * 2.0;
+		return t < 1.0 ? t : 2.0 - t;
+	}
+	int hash( int seed, int x_primed, int y_primed )
+	{
+		return ( seed ^ x_primed ^ y_primed ) * 0x27d4eb2d;
+	}
+	float val_coord( int seed, int x_primed, int y_primed )
+	{
+	    int hash = hash( seed, x_primed, y_primed );
+	    hash *= hash;
+	    hash ^= hash << 19;
+	    return float( hash ) * ( 1.0 / 2147483648.0 );
+	}
+	float single_value_cubic( int seed, float x, float y )
+	{
+	    int x1 = int( floor( x ));
+	    int y1 = int( floor( y ));
+
+	    float xs = x - float( x1 );
+	    float ys = y - float( y1 );
+
+	    x1 *= PRIME_X;
+	    y1 *= PRIME_Y;
+	    int x0 = x1 - PRIME_X;
+	    int y0 = y1 - PRIME_Y;
+	    int x2 = x1 + PRIME_X;
+	    int y2 = y1 + PRIME_Y;
+	    int x3 = x1 + ( PRIME_X << 1 );
+	    int y3 = y1 + ( PRIME_Y << 1 );
+
+	    return cubic_lerp(
+	        cubic_lerp( val_coord( seed, x0, y0 ), val_coord( seed, x1, y0 ), val_coord( seed, x2, y0 ), val_coord( seed, x3, y0 ), xs ),
+	        cubic_lerp( val_coord( seed, x0, y1 ), val_coord( seed, x1, y1 ), val_coord( seed, x2, y1 ), val_coord( seed, x3, y1 ), xs ),
+	        cubic_lerp( val_coord( seed, x0, y2 ), val_coord( seed, x1, y2 ), val_coord( seed, x2, y2 ), val_coord( seed, x3, y2 ), xs ),
+	        cubic_lerp( val_coord( seed, x0, y3 ), val_coord( seed, x1, y3 ), val_coord( seed, x2, y3 ), val_coord( seed, x3, y3 ), xs ),
+	    ys ) * ( 1.0 / ( 1.5 * 1.5 ));
+	}
+	// Params can be change in the same way as in noise settings in Godot
+	const float FRACTAL_BOUNDING = 1.0 / 1.75;
+	const int OCTAVES = 5;
+	const float PING_PONG_STRENGTH = 2.0;
+	const float WEIGHTED_STRENGTH = 0.0;
+	const float GAIN = 0.5;
+	const float LACUNARITY = 2.0;
+	float gen_fractal_ping_pong( vec2 pos, int seed, float frequency )
+	{
+		float x = pos.x * frequency;
+		float y = pos.y * frequency;
+	    float sum = 0.0;
+		float amp = FRACTAL_BOUNDING;
+	    for( int i = 0; i < OCTAVES; i++ )
+	    {
+	        float noise = ping_pong(( single_value_cubic( seed++, x, y ) + 1.0 ) * PING_PONG_STRENGTH );
+	        sum += ( noise - 0.5 ) * 2.0 * amp;
+	        amp *= lerp( 1.0, noise, WEIGHTED_STRENGTH );
+	        x *= LACUNARITY;
+	        y *= LACUNARITY;
+	        amp *= GAIN;
+	    }
+	    return sum * 0.5 + 0.5;
+	}
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Function needed to calculate the phase of the moon
+// Source: https://kelvinvanhoorn.com/2022/03/17/skybox-tutorial-part-1/
+float sphere_intersect( vec3 view_dir, vec3 sphere_pos, float radius )
+{
+    float b = dot( -sphere_pos, view_dir );
+    float c = dot( -sphere_pos, -sphere_pos ) - pow( radius, 2 );
+    float h = pow( b, 2 ) - c;
+    return h < 0.0 ? -1.0 : -b - sqrt( h );
+}
+
+void sky()
+{
+	float time = overwritten_time != 0.0 ? overwritten_time : TIME;
+
+	//////////////////// SKY ///////////////////////////////////////////////////////////////////////
+	float _eyedir_y = abs( sin( EYEDIR.y * PI * 0.5 ));
+
+	// The day color will be our base color
+	vec3 _sky_color = mix( day_bottom_color, day_top_color, _eyedir_y );
+	_sky_color = mix( _sky_color, vec3( 0.0 ), clamp(( 0.7 - clouds_cutoff ) * clouds_weight, 0.0, 1.0 ));
+
+	float _sunset_amount = clamp( 0.5 - abs( LIGHT0_DIRECTION.y ), 0.0, 0.5 ) * 2.0;
+	// The sky should be more red around the west, on the opposite side you don't see it as much
+	float _sunset_distance = clamp( 1.0 - pow( distance( EYEDIR, LIGHT0_DIRECTION ), 2 ), 0.0, 1.0 );
+	vec3 _sky_sunset_color = mix( sunset_bottom_color, sunset_top_color, _eyedir_y + 0.5 );
+	_sky_sunset_color = mix( _sky_sunset_color, sunset_bottom_color, _sunset_amount * _sunset_distance );
+	_sky_color = mix( _sky_color, _sky_sunset_color, _sunset_amount );
+
+	float _night_amount = clamp( -LIGHT0_DIRECTION.y + 0.7, 0.0, 1.0 );
+	vec3 _sky_night_color = mix( night_bottom_color, night_top_color, _eyedir_y );
+	_sky_color = mix( _sky_color, _sky_night_color, _night_amount );
+
+	// Final sky color
+	COLOR = _sky_color;
+
+	//////////////////// HORIZON ///////////////////////////////////////////////////////////////////
+	float _horizon_amount = 0.0;
+	if( EYEDIR.y < 0.0 )
+	{
+		_horizon_amount = clamp( abs( EYEDIR.y ) / horizon_blur, 0.0, 1.0 );
+		// Mixing with the color of the night sky to make the horizon darker
+		vec3 _horizon_color = mix( horizon_color, _sky_color, _night_amount * 0.9 );
+		// And if ther are many dark clouds, we also make the horizon darker
+		_horizon_color = mix( _horizon_color, vec3( 0.0 ), ( 1.0 - clouds_cutoff ) * clouds_weight * 0.7 );
+		COLOR = mix( COLOR, _horizon_color, _horizon_amount );
+	}
+
+	//////////////////// MOON //////////////////////////////////////////////////////////////////////
+	float _moon_amount = 0.0;
+	if( LIGHT1_ENABLED )
+	{
+		// Bigger moon near the horizon
+		float _moon_size = moon_size + cos( LIGHT1_DIRECTION.y * PI ) * moon_size * 0.25;
+		float _moon_distance = distance( EYEDIR, LIGHT1_DIRECTION ) / _moon_size;
+		// Finding moon disc and edge blur
+		_moon_amount = clamp(( 1.0 - _moon_distance ) / moon_blur, 0.0, 1.0 );
+		if( _moon_amount > 0.0 )
+		{
+			// Moon illumination depending on the position of the sun
+			float _moon_intersect = sphere_intersect( EYEDIR, LIGHT1_DIRECTION, _moon_size );
+			vec3 _moon_normal = normalize( LIGHT1_DIRECTION - EYEDIR * _moon_intersect );
+			// Power on the result gives a better effect
+			float _moon_n_dot_l = pow( clamp( dot( _moon_normal, -LIGHT0_DIRECTION ), 0.05, 1.0 ), 2 );
+			// Hiding the moon behind the horizon
+			_moon_amount *= 1.0 - _horizon_amount;
+			COLOR = mix( COLOR, moon_color, _moon_n_dot_l * _moon_amount );
+		}
+	}
+
+	//////////////////// SUN ///////////////////////////////////////////////////////////////////////
+	float _sun_distance = 0.0;
+	if( LIGHT0_ENABLED )
+	{
+		_sun_distance = distance( EYEDIR, LIGHT0_DIRECTION );
+		// Bigger sun near the horizon
+		float _sun_size = sun_size + cos( LIGHT0_DIRECTION.y * PI ) * sun_size * 0.25;
+		// Finding sun disc and edge blur
+		float _sun_amount = clamp(( 1.0 - _sun_distance / _sun_size ) / sun_blur, 0.0, 1.0 );
+		if( _sun_amount > 0.0 )
+		{
+			// Changing color of the sun during sunset
+			float _sunset_amount = 1.0;
+			if( LIGHT0_DIRECTION.y > 0.0 )
+				_sunset_amount = clamp( cos( LIGHT0_DIRECTION.y * PI ), 0.0, 1.0 );
+			vec3 _sun_color = mix( sun_color, sun_sunset_color, _sunset_amount );
+			// Hiding the sun behind the moon
+			_sun_amount = clamp( _sun_amount * ( 1.0 - _moon_amount ), 0.0, 1.0 );
+			// Hiding the sun behind the horizon
+			_sun_amount *= 1.0 - _horizon_amount;
+			// Leveling the \"glow\" in color
+			if( _sun_color.r > 1.0 || _sun_color.g > 1.0 || _sun_color.b > 1.0 )
+				_sun_color *= _sun_amount;
+			COLOR = mix( COLOR, _sun_color, _sun_amount );
+		}
+	}
+
+	//////////////////// STARS /////////////////////////////////////////////////////////////////
+	vec2 _sky_uv = EYEDIR.xz / sqrt( EYEDIR.y );
+	if( EYEDIR.y > -0.01 && LIGHT0_DIRECTION.y < 0.0  )
+	{
+		// Stars UV rotation
+		float _stars_speed_cos = cos( stars_speed * time * 0.005 );
+		float _stars_speed_sin = sin( stars_speed * time * 0.005 );
+		vec2 _stars_uv = vec2(
+			_sky_uv.x * _stars_speed_cos - _sky_uv.y * _stars_speed_sin,
+			_sky_uv.x * _stars_speed_sin + _sky_uv.y * _stars_speed_cos
+		);
+		// Stars texture
+		vec3 _stars_color = texture( stars_texture, _stars_uv ).rgb * -LIGHT0_DIRECTION.y;
+		// Hiding stars behind the moon
+		_stars_color *= 1.0 - _moon_amount;
+		COLOR += _stars_color;
+	}
+
+	//////////////////// CLOUDS ////////////////////////////////////////////////////////////////
+	if( EYEDIR.y > 0.0 )
+	{
+		// Clouds UV movement direction
+		float _clouds_speed = time * clouds_speed * 0.01;
+		float _sin_x = sin( clouds_direction * PI * 2.0 );
+		float _cos_y = cos( clouds_direction * PI * 2.0 );
+		// I using 3 levels of clouds. Top is the lightes and botom the darkest.
+		// The speed of movement (and direction a little) is different for the illusion of the changing shape of the clouds.
+		vec2 _clouds_movement = vec2( _sin_x, _cos_y ) * _clouds_speed;
+//		float _noise_top = texture( clouds_top_texture, ( _sky_uv + _clouds_movement ) * clouds_scale ).r;
+		float _noise_top = gen_fractal_ping_pong( ( _sky_uv + _clouds_movement ) * clouds_scale, 0, 0.5 );
+		_clouds_movement = vec2( _sin_x * 0.97, _cos_y * 1.07 ) * _clouds_speed * 0.89;
+//		float _noise_middle = texture( clouds_middle_texture, ( _sky_uv + _clouds_movement ) * clouds_scale ).r;
+		float _noise_middle = gen_fractal_ping_pong( ( _sky_uv + _clouds_movement ) * clouds_scale, 1, 0.75 );
+		_clouds_movement = vec2( _sin_x * 1.01, _cos_y * 0.89 ) * _clouds_speed * 0.79;
+//		float _noise_bottom = texture( clouds_bottom_texture, ( _sky_uv + _clouds_movement ) * clouds_scale ).r;
+		float _noise_bottom = gen_fractal_ping_pong( ( _sky_uv + _clouds_movement ) * clouds_scale, 2, 1.0 );
+		// Smoothstep with the addition of a noise value from a lower level gives a nice, deep result
+		_noise_bottom = smoothstep( clouds_cutoff, clouds_cutoff + clouds_fuzziness, _noise_bottom );
+		_noise_middle = smoothstep( clouds_cutoff, clouds_cutoff + clouds_fuzziness, _noise_middle + _noise_bottom * 0.2 ) * 1.1;
+		_noise_top = smoothstep( clouds_cutoff, clouds_cutoff + clouds_fuzziness, _noise_top + _noise_middle * 0.4 ) * 1.2;
+		float _clouds_amount = clamp( _noise_top + _noise_middle + _noise_bottom, 0.0, 1.0 );
+		// Fading clouds near the horizon
+		_clouds_amount *= clamp( abs( EYEDIR.y ) / clouds_blur, 0.0, 1.0 );
+
+		vec3 _clouds_color = mix( vec3( 0.0 ), clouds_top_color, _noise_top );
+		_clouds_color = mix( _clouds_color, clouds_middle_color, _noise_middle );
+		_clouds_color = mix( _clouds_color, clouds_bottom_color, _noise_bottom );
+		// The edge color gives a nice smooth edge, you can try turning this off if you need sharper edges
+		_clouds_color = mix( clouds_edge_color, _clouds_color, _noise_top );
+		// The sun passing through the clouds effect
+		_clouds_color = mix( _clouds_color, clamp( sun_color, 0.0, 1.0 ), pow( 1.0 - clamp( _sun_distance, 0.0, 1.0 ), 5 ));
+		// Color combined with sunset condition
+		_clouds_color = mix( _clouds_color, sunset_bottom_color, _sunset_amount * 0.75 );
+		// Color depending on the \"progress\" of the night.
+		_clouds_color = mix( _clouds_color, _sky_color, clamp( _night_amount, 0.0, 0.98 ));
+		_clouds_color = mix( _clouds_color, vec3( 0.0 ), clouds_weight * 0.9 );
+		COLOR = mix( COLOR, _clouds_color, _clouds_amount );
+	}
+}"
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_2dq5t"]
+shader = SubResource("Shader_q27e0")
+shader_parameter/day_top_color = Color(0.556863, 0.776471, 1, 1)
+shader_parameter/day_bottom_color = Color(0.454902, 0.592157, 0.721569, 1)
+shader_parameter/sunset_top_color = Color(0.7, 0.75, 1, 1)
+shader_parameter/sunset_bottom_color = Color(1, 0.5, 0.7, 1)
+shader_parameter/night_top_color = Color(0.02, 0, 0.04, 1)
+shader_parameter/night_bottom_color = Color(0.1, 0, 0.2, 1)
+shader_parameter/horizon_color = Color(0.823529, 0.94902, 0.968627, 1)
+shader_parameter/horizon_blur = 0.05
+shader_parameter/sun_color = Color(10, 8, 1, 1)
+shader_parameter/sun_sunset_color = Color(10, 0, 0, 1)
+shader_parameter/sun_size = 0.2
+shader_parameter/sun_blur = 10.0
+shader_parameter/moon_color = Color(1, 0.95, 0.7, 1)
+shader_parameter/moon_size = 0.06
+shader_parameter/moon_blur = 0.1
+shader_parameter/clouds_edge_color = Color(0.8, 0.8, 0.98, 1)
+shader_parameter/clouds_top_color = Color(1, 1, 1, 1)
+shader_parameter/clouds_middle_color = Color(0.92, 0.92, 0.98, 1)
+shader_parameter/clouds_bottom_color = Color(0.83, 0.83, 0.94, 1)
+shader_parameter/clouds_speed = 1.7
+shader_parameter/clouds_direction = 0.2
+shader_parameter/clouds_scale = 2.0
+shader_parameter/clouds_cutoff = 0.23
+shader_parameter/clouds_fuzziness = 0.5
+shader_parameter/clouds_weight = 0.0
+shader_parameter/clouds_blur = 0.25
+shader_parameter/stars_speed = 1.0
+shader_parameter/overwritten_time = 0.0
+
+[sub_resource type="Sky" id="Sky_yvc70"]
+sky_material = SubResource("ShaderMaterial_2dq5t")
+
+[sub_resource type="Environment" id="Environment_8vr7a"]
+background_mode = 2
+sky = SubResource("Sky_yvc70")
+tonemap_mode = 2
+ssao_enabled = true
+sdfgi_enabled = true
+glow_enabled = true
+fog_sun_scatter = 0.29
+fog_density = 0.0065
+volumetric_fog_density = 0.01
+
+[sub_resource type="Shader" id="Shader_ang0y"]
+code = "shader_type spatial;
+render_mode cull_disabled, depth_draw_always;
+
+uniform float height_scale = 1.0;
+
+uniform vec3 sun_direction;
+uniform int wave_count;
+
+uniform vec3 water_base_colour : source_color;
+uniform vec3 water_peak_colour : source_color;
+
+uniform float transparency : hint_range(0.0, 1.0, 0.01) = 0.4;
+uniform float metallic : hint_range(0.0, 1.0, 0.01) = 0;
+uniform float roughness : hint_range(0.0, 1.0, 0.01) = 0.5;
+uniform float specular :hint_range(0.0, 1.0, 0.01) = 1.0;
+uniform float sss_intensity;
+uniform vec4 sss_colour: source_color;
+
+uniform float foam_bias;
+uniform float foam_intensity;
+uniform float vertex_frequency;
+uniform float vertex_amplitude;
+uniform float vertex_max_peak;
+uniform float vertex_peak_offset;
+uniform float vertex_drag;
+uniform float vertex_seed;
+uniform float vertex_frequency_mult;
+uniform float vertex_amplitude_mult;
+uniform float vertex_speed_ramp;
+uniform float initial_speed;
+uniform float vertex_seed_iter;
+uniform float vertex_height;
+
+uniform float ssr_resolution   : hint_range(0.1, 10.0, 0.1)		= 2.0;
+uniform float ssr_max_travel   : hint_range(0.1, 200.0, 0.1) 	= 30.0;
+uniform float ssr_max_diff     : hint_range(0.1, 10.0, 0.1) 	= 4.0;
+uniform float ssr_mix_strength : hint_range(0.0, 1.0, 0.01) 	= 0.7;
+uniform float refraction_intensity : hint_range(0.0, 1.0, 0.01) = 0.4;
+uniform float max_visible_depth : hint_range(0.0, 100.0, 0.1) = 10.0;
+uniform vec3 color_deep : source_color = vec3(0.0, 0.1, 0.4);
+
+uniform vec3  border_color : source_color = vec3(1.0);
+uniform float border_scale : hint_range(0.0, 5.0, 0.01) = 2.0;
+uniform float border_near = 0.5;
+uniform float border_far = 300.0;
+uniform float border_influence = 0.5;
+
+uniform sampler2D DEPTH_TEXTURE : hint_depth_texture, filter_linear_mipmap;
+uniform sampler2D SCREEN_TEXTURE : hint_screen_texture, filter_linear_mipmap;
+
+struct Wave
+{
+	vec2 direction;
+	float frequency;
+	float amplitude;
+	float phase;
+	float steepness;
+};
+
+struct VertexData
+{
+	float height;
+	vec3 normal;
+};
+
+float get_wave_coord(vec3 v, vec2 d, Wave w)
+{
+	return v.x * d.x + v.z * d.y;
+}
+
+float get_time(Wave w)
+{
+	return TIME * w.phase;
+}
+
+float sine(vec3 v, Wave w)
+{
+	vec2 d = w.direction;
+	float xz = get_wave_coord(v, d, w);
+	float t = get_time(w);
+	
+	return w.amplitude * sin(xz * w.frequency + t);
+}
+
+vec3 sine_normal(vec3 v, Wave w)
+{
+	vec2 d = w.direction;
+	float xz = get_wave_coord(v, d, w);
+	float t = get_time(w);
+	
+	vec2 n = w.frequency * w.amplitude * d * cos(xz * w.frequency + t);
+	return vec3(n.x, 0.0, n.y);
+}
+
+vec2 pan(vec2 coords, vec2 speed)
+{
+	return coords + (TIME * speed);
+}
+
+float sum_of_sin(float a, float b)
+{
+	return (sin(a) * cos(b)) + (cos(a) * sin(b));
+}
+
+float sin_wave(vec2 uv, float amplitude, float wavelength, float speed)
+{
+	return amplitude * sin(((uv.x + uv.y) * (2.0/wavelength)) + (TIME * speed)); // 2/wavelength == frequency
+}
+
+float pd(vec2 uv, float amplitude, float wavelength, float speed)
+{
+	return amplitude * cos(((uv.x + uv.y) * (2.0/wavelength)) + (TIME * speed));
+}
+
+vec3 vertexFBM(vec2 position)
+{
+	float f = vertex_frequency;
+	float a = vertex_amplitude;
+	float speed = initial_speed;
+	float seed = vertex_seed;
+	vec3 p = vec3(position.x, 0, position.y);
+	float amplitudeSum = 0.0;
+	float h = 0.0;
+	vec2 n = vec2(0.0);
+	vec3 normal;
+	for (int i = 0; i < wave_count; ++i)
+	{
+		vec2 d = normalize(vec2(cos(seed), sin(seed)));
+		float x = dot(d, p.xz) * f + TIME * speed;
+		float wave = a * exp(vertex_max_peak * sin(x) - vertex_peak_offset);
+
+		vec2 dw = f * d * (vertex_max_peak * wave * cos(x)); //perhaps removevmaxpeak
+		float dx = vertex_max_peak * wave * cos(x);
+		
+		h += wave;
+		n += dw;
+
+		
+		p.xz += d * -dx * a * vertex_drag;
+		
+		amplitudeSum += a;
+		f *= vertex_frequency_mult;
+		a *= vertex_amplitude_mult;
+		speed *= vertex_speed_ramp;
+		seed += vertex_seed_iter;
+	}
+	vec3 output = vec3(h, n.x, n.y) / amplitudeSum;
+	output.x *= vertex_height;
+	
+	return output;
+}
+vec3 get_view_position_from_uv(vec2 uv, float depth, mat4 inv_proj_m)
+{
+	vec4 position_ndc = vec4((uv * 2.0) - 1.0, depth, 1.0);
+	vec4 view_position = inv_proj_m * position_ndc;
+	return view_position.xyz /= view_position.w;
+}
+
+vec2 get_uv_from_view_position(vec3 position_view_space, mat4 proj_m)
+{
+	vec4 position_clip_space = proj_m * vec4(position_view_space.xyz, 1.0);
+	vec2 position_ndc = position_clip_space.xy / position_clip_space.w;
+	return position_ndc.xy * 0.5 + 0.5;
+}
+
+bool is_within_screen_boundaries(vec2 position) {
+	return position.x > 0.0 && position.x < 1.0 && position.y > 0.0 && position.y < 1.0;
+}
+
+vec3 get_ssr_color(vec3 surface_view_position, vec3 normal_view_space, vec3 view_view_space, mat4 proj_m, mat4 inv_proj_m)
+{
+	vec3 current_position_view_space = surface_view_position;
+	vec3 view_direction_view_space = view_view_space * -1.0;
+	vec3 reflect_vector_view_space = normalize(reflect(view_direction_view_space.xyz, normal_view_space.xyz));
+
+	vec2 current_screen_position = vec2(0.0);
+
+	vec3 resulting_color = vec3(-1.0);
+	for(float travel=0.0; resulting_color.x < 0.0 && travel < ssr_max_travel; travel = travel + ssr_resolution)
+	{
+		current_position_view_space += reflect_vector_view_space * ssr_resolution;
+		current_screen_position = get_uv_from_view_position(current_position_view_space, proj_m);
+
+		float depth_texture_probe_raw = texture(DEPTH_TEXTURE, current_screen_position).x;
+		vec3 depth_texture_probe_view_position = get_view_position_from_uv(current_screen_position, depth_texture_probe_raw, inv_proj_m);
+
+		float depth_diff = depth_texture_probe_view_position.z - current_position_view_space.z;
+
+		resulting_color = (is_within_screen_boundaries(current_screen_position) && depth_diff >= 0.0 && depth_diff < ssr_max_diff) ? texture(SCREEN_TEXTURE, current_screen_position.xy).rgb : vec3(-1.0);
+	}
+	return resulting_color;
+}
+
+vec2 get_refracted_uv(vec2 raw_screen_uv, float screen_depth_raw, vec3 view, vec3 normal, mat4 proj_m, mat4 inv_proj_m)
+{
+		vec3 screen_view_position_original = get_view_position_from_uv(raw_screen_uv, screen_depth_raw, inv_proj_m);
+		float screen_center_distance = clamp(abs(length(raw_screen_uv - vec2(0.5, 0.5))) * 2.0, 0.0, 1.0);
+		float refraction_intensity_deglitched = mix(1.0 - refraction_intensity, 1.0, screen_center_distance);
+		vec3 refraction_position_view_space = screen_view_position_original + normalize(refract(view, -normal, refraction_intensity_deglitched));
+		vec2 refraction_uv = get_uv_from_view_position(refraction_position_view_space, proj_m);
+		return refraction_uv;
+}
+
+float normalize_float(float min_v, float max_v, float value) {
+	float clamped_value = clamp(value, min_v, max_v);
+	return  (clamped_value - min_v) / (max_v - min_v);
+}
+
+float border(float cur_depth)
+{
+	return border_near * border_far / (border_far + (2.0 * cur_depth - 1.0) * (border_near - border_far));
+}
+
+void vertex() {	
+	vec3 worldpos = (MODEL_MATRIX * vec4(VERTEX, 1)).xyz;
+	vec3 vdata = vertexFBM(worldpos.xz);
+	vec3 vdatalocal = (inverse(MODEL_MATRIX) * vec4(vdata, 1)).xyz;
+	VERTEX.y += vdatalocal.x * vertex_height;
+}
+
+void fragment() {
+	
+	vec3 worldpos = ((INV_VIEW_MATRIX) * vec4(VERTEX, 1.0)).xyz;
+
+	vec3 vdata = vertexFBM(worldpos.xz);
+	vec3 n = vec3(0.0);
+	n.xy = vdata.yz;
+	
+	vec3 tangent = vec3(1, n.x, 0.0);
+	vec3 bitangent = vec3(0, n.y, 1.0);
+	vec3 norm = cross(bitangent, tangent);
+	NORMAL = normalize((transpose(INV_VIEW_MATRIX) * vec4(norm.x, norm.y, norm.z, 1)).xyz);
+	
+	float screen_depth_raw = texture(DEPTH_TEXTURE, SCREEN_UV).x;
+	vec2 refraction_uv = refraction_intensity > 0.0 ? get_refracted_uv(SCREEN_UV, screen_depth_raw, VIEW, NORMAL, PROJECTION_MATRIX, INV_PROJECTION_MATRIX) : SCREEN_UV;
+
+	float screen_depth = texture(DEPTH_TEXTURE, refraction_uv).x;
+	float surface_depth = FRAGCOORD.z;
+
+
+	vec3 screen_view_position 	= get_view_position_from_uv(refraction_uv, screen_depth, INV_PROJECTION_MATRIX);
+	vec3 surface_view_position 	= get_view_position_from_uv(refraction_uv, surface_depth, INV_PROJECTION_MATRIX);
+	float depth_opacity = 1.0 - normalize_float(0.0, max_visible_depth, length(surface_view_position - screen_view_position));
+
+
+	float border_diff = border(screen_depth_raw) - border(surface_depth);
+
+	vec3 screen_color 				= texture(SCREEN_TEXTURE, refraction_uv).rgb;
+	vec3 surface_color 				= water_base_colour;
+	vec3 ssr_color 					= get_ssr_color(surface_view_position, NORMAL, VIEW, PROJECTION_MATRIX, INV_PROJECTION_MATRIX);
+	vec3 color_with_transparency 	= mix(surface_color, screen_color, transparency);
+	vec3 depth_color 				= mix(color_deep.rgb, color_with_transparency, depth_opacity);
+	vec3 water_color 				= (ssr_color.x >= 0.0) ? mix(depth_color, ssr_color, ssr_mix_strength) : depth_color;
+	vec3 bcol						= mix (water_color, border_color, border_influence);
+	vec3 final_color				= mix(bcol, water_color, step(border_scale, border_diff));
+
+
+
+	
+	final_color = mix(final_color, water_peak_colour, clamp((vdata.x + foam_bias) * foam_intensity, 0, 1));
+	
+	ALBEDO = final_color;
+	SPECULAR = specular;
+	ROUGHNESS = roughness;
+	METALLIC = metallic;
+}
+
+//void light() {
+	// Called for every pixel for every light affecting the material.
+	// Uncomment to replace the default light processing function with this one.
+//}
+"
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_8e1i8"]
+render_priority = 0
+shader = SubResource("Shader_ang0y")
+shader_parameter/height_scale = 14.39
+shader_parameter/sun_direction = null
+shader_parameter/wave_count = 13
+shader_parameter/water_base_colour = Color(0.0823529, 0.145098, 0.219608, 1)
+shader_parameter/water_peak_colour = Color(1, 1, 1, 1)
+shader_parameter/transparency = 0.5
+shader_parameter/metallic = 0.7
+shader_parameter/roughness = 0.0
+shader_parameter/specular = 1.0
+shader_parameter/sss_intensity = 10.0
+shader_parameter/sss_colour = Color(0.992157, 0, 0.227451, 1)
+shader_parameter/foam_bias = -3.065
+shader_parameter/foam_intensity = 0.0
+shader_parameter/vertex_frequency = 0.08
+shader_parameter/vertex_amplitude = 0.01
+shader_parameter/vertex_max_peak = 1.97
+shader_parameter/vertex_peak_offset = 0.0
+shader_parameter/vertex_drag = 1.82
+shader_parameter/vertex_seed = 1.0
+shader_parameter/vertex_frequency_mult = 1.36
+shader_parameter/vertex_amplitude_mult = 0.63
+shader_parameter/vertex_speed_ramp = 1.02
+shader_parameter/initial_speed = 1.0
+shader_parameter/vertex_seed_iter = 1.0
+shader_parameter/vertex_height = 1.0
+shader_parameter/ssr_resolution = 2.0
+shader_parameter/ssr_max_travel = 30.0
+shader_parameter/ssr_max_diff = 4.0
+shader_parameter/ssr_mix_strength = 0.7
+shader_parameter/refraction_intensity = 0.4
+shader_parameter/max_visible_depth = 26.4
+shader_parameter/color_deep = Color(0, 0.0352941, 0.203922, 1)
+shader_parameter/border_color = Color(0.670588, 0.670588, 0.670588, 1)
+shader_parameter/border_scale = 1.1
+shader_parameter/border_near = 0.5
+shader_parameter/border_far = 5000.0
+shader_parameter/border_influence = 0.0
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_abty6"]
+material = SubResource("ShaderMaterial_8e1i8")
+size = Vector2(100, 100)
+subdivide_width = 300
+subdivide_depth = 300
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_ku30i"]
+render_priority = 0
+shader = SubResource("Shader_ang0y")
+shader_parameter/height_scale = 14.39
+shader_parameter/sun_direction = null
+shader_parameter/wave_count = 13
+shader_parameter/water_base_colour = Color(0.0823529, 0.145098, 0.219608, 1)
+shader_parameter/water_peak_colour = Color(1, 1, 1, 1)
+shader_parameter/transparency = 0.5
+shader_parameter/metallic = 0.7
+shader_parameter/roughness = 0.0
+shader_parameter/specular = 1.0
+shader_parameter/sss_intensity = 10.0
+shader_parameter/sss_colour = Color(0.992157, 0, 0.227451, 1)
+shader_parameter/foam_bias = -3.065
+shader_parameter/foam_intensity = 0.0
+shader_parameter/vertex_frequency = 0.08
+shader_parameter/vertex_amplitude = 0.01
+shader_parameter/vertex_max_peak = 1.97
+shader_parameter/vertex_peak_offset = 0.0
+shader_parameter/vertex_drag = 1.82
+shader_parameter/vertex_seed = 1.0
+shader_parameter/vertex_frequency_mult = 1.36
+shader_parameter/vertex_amplitude_mult = 0.63
+shader_parameter/vertex_speed_ramp = 1.02
+shader_parameter/initial_speed = 1.0
+shader_parameter/vertex_seed_iter = 1.0
+shader_parameter/vertex_height = 1.0
+shader_parameter/ssr_resolution = 2.0
+shader_parameter/ssr_max_travel = 30.0
+shader_parameter/ssr_max_diff = 4.0
+shader_parameter/ssr_mix_strength = 0.7
+shader_parameter/refraction_intensity = 0.4
+shader_parameter/max_visible_depth = 26.4
+shader_parameter/color_deep = Color(0, 0.0352941, 0.203922, 1)
+shader_parameter/border_color = Color(0.670588, 0.670588, 0.670588, 1)
+shader_parameter/border_scale = 1.1
+shader_parameter/border_near = 0.5
+shader_parameter/border_far = 5000.0
+shader_parameter/border_influence = 0.0
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_eg34u"]
+material = SubResource("ShaderMaterial_ku30i")
+size = Vector2(100, 100)
+subdivide_width = 300
+subdivide_depth = 300
+
+[sub_resource type="Shader" id="Shader_2jq0d"]
+code = "shader_type spatial;
+
+uniform ivec2 effect_texture_size;
+uniform sampler2D effect_texture;
+
+void vertex() {
+	// Called for every vertex the material is visible on.
+}
+
+void fragment() {
+	ALBEDO = texture(effect_texture, UV).xyz;
+}
+
+//void light() {
+	// Called for every pixel for every light affecting the material.
+	// Uncomment to replace the default light processing function with this one.
+//}
+"
+
+[sub_resource type="Texture2DRD" id="Texture2DRD_f1sul"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_pj2cr"]
+render_priority = 0
+shader = SubResource("Shader_2jq0d")
+shader_parameter/effect_texture_size = null
+shader_parameter/effect_texture = SubResource("Texture2DRD_f1sul")
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_anj5s"]
+size = Vector2(100, 100)
+
+[node name="Main" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_8vr7a")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(-0.508518, -0.599822, 0.617756, -0.12941, 0.762535, 0.633872, -0.851271, 0.242392, -0.465386, 0, 0, 0)
+shadow_enabled = true
+
+[node name="Vertex_OceanPlane" type="MeshInstance3D" parent="."]
+transform = Transform3D(6.5276, 0, 0, 0, 6.5276, 0, 0, 0, 6.5276, 0, 0, 0)
+visible = false
+mesh = SubResource("PlaneMesh_abty6")
+
+[node name="Compute_OceanPlane" type="MeshInstance3D" parent="."]
+transform = Transform3D(6.5276, 0, 0, 0, 6.5276, 0, 0, 0, 6.5276, 0, 0, 0)
+visible = false
+mesh = SubResource("PlaneMesh_eg34u")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+material_override = SubResource("ShaderMaterial_pj2cr")
+mesh = SubResource("PlaneMesh_anj5s")
+
+[node name="Camera3D" type="Camera3D" parent="MeshInstance3D"]
+transform = Transform3D(1, 0, 0, 0, -4.37114e-08, 1, 0, -1, -4.37114e-08, -0.0688744, 29.3495, -0.674055)
+fov = 121.0
+
+[node name="GameOfLifeSimulation" parent="." instance=ExtResource("5_182jw")]
+
+[node name="FPSCounter" parent="." instance=ExtResource("6_8id5a")]
